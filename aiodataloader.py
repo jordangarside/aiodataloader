@@ -1,41 +1,62 @@
-from asyncio import gather, ensure_future, get_event_loop, iscoroutine, iscoroutinefunction
+from asyncio import (
+    gather,
+    ensure_future,
+    get_event_loop,
+    iscoroutine,
+    iscoroutinefunction,
+)
 from collections import Iterable, namedtuple
 from functools import partial
 
-from typing import List  # flake8: noqa
+from asyncio import BaseEventLoop, Future
+from typing import List, Generic, TypeVar, Optional, Awaitable, Callable  # flake8: noqa
 
 
-__version__ = '0.2.0'
+__version__ = "0.2.1"
 
-Loader = namedtuple('Loader', 'key,future')
+KeyType = str  # Union[str, int, float] ???
+DataType = TypeVar("DataType")
+
+Loader = namedtuple("Loader", "key,future")
 
 
 def iscoroutinefunctionorpartial(fn):
     return iscoroutinefunction(fn.func if isinstance(fn, partial) else fn)
 
 
-class DataLoader(object):
+class DataLoader(Generic[DataType], object):
 
     batch = True
-    max_batch_size = None  # type: int
+    max_batch_size: Optional[int] = None
     cache = True
 
-    def __init__(self, batch_load_fn=None, batch=None, max_batch_size=None,
-                 cache=None, get_cache_key=None, cache_map=None, loop=None):
+    def __init__(
+        self,
+        batch_load_fn=Callable[[List[KeyType]], Awaitable[List[DataType]]],
+        batch: Optional[bool] = None,
+        max_batch_size: Optional[int] = None,
+        cache: Optional[bool] = None,
+        get_cache_key: Optional[Callable[[KeyType], KeyType]] = None,
+        cache_map: Optional[dict] = None,
+        loop: Optional[BaseEventLoop] = None,
+    ):
 
         self.loop = loop or get_event_loop()
 
         if batch_load_fn is not None:
             self.batch_load_fn = batch_load_fn
 
-        assert iscoroutinefunctionorpartial(self.batch_load_fn), "batch_load_fn must be coroutine. Received: {}".format(
-            self.batch_load_fn)
+        assert iscoroutinefunctionorpartial(
+            self.batch_load_fn
+        ), "batch_load_fn must be coroutine. Received: {}".format(self.batch_load_fn)
 
         if not callable(self.batch_load_fn):
-            raise TypeError((
-                'DataLoader must be have a batch_load_fn which accepts '
-                'Iterable<key> and returns Future<Iterable<value>>, but got: {}.'
-            ).format(batch_load_fn))
+            raise TypeError(
+                (
+                    "DataLoader must be have a batch_load_fn which accepts "
+                    "Iterable<key> and returns Future<Iterable<value>>, but got: {}."
+                ).format(batch_load_fn)
+            )
 
         if batch is not None:
             self.batch = batch
@@ -51,15 +72,17 @@ class DataLoader(object):
         self._cache = cache_map if cache_map is not None else {}
         self._queue = []  # type: List[Loader]
 
-    def load(self, key=None):
+    def load(self, key: KeyType = None) -> Awaitable[DataType]:
         """
         Loads a key, returning a `Future` for the value represented by that key.
         """
         if key is None:
-            raise TypeError((
-                'The loader.load() function must be called with a value, '
-                'but got: {}.'
-            ).format(key))
+            raise TypeError(
+                (
+                    "The loader.load() function must be called with a value, "
+                    "but got: {}."
+                ).format(key)
+            )
 
         cache_key = self.get_cache_key(key)
 
@@ -78,12 +101,9 @@ class DataLoader(object):
         self.do_resolve_reject(key, future)
         return future
 
-    def do_resolve_reject(self, key, future):
+    def do_resolve_reject(self, key: KeyType, future: Future):
         # Enqueue this Future to be dispatched.
-        self._queue.append(Loader(
-            key=key,
-            future=future
-        ))
+        self._queue.append(Loader(key=key, future=future))
         # Determine if a dispatch of this queue should be scheduled.
         # A single dispatch should be scheduled per queue at the time when the
         # queue changes from "empty" to "full".
@@ -95,7 +115,7 @@ class DataLoader(object):
                 # Otherwise dispatch the (queue of one) immediately.
                 dispatch_queue(self)
 
-    def load_many(self, keys):
+    def load_many(self, keys: List[KeyType]) -> Awaitable[List[DataType]]:
         """
         Loads multiple keys, returning a list of values
 
@@ -109,14 +129,16 @@ class DataLoader(object):
         >>> )
         """
         if not isinstance(keys, Iterable):
-            raise TypeError((
-                'The loader.load_many() function must be called with Iterable<key> '
-                'but got: {}.'
-            ).format(keys))
+            raise TypeError(
+                (
+                    "The loader.load_many() function must be called with Iterable<key> "
+                    "but got: {}."
+                ).format(keys)
+            )
 
         return gather(*[self.load(key) for key in keys])
 
-    def clear(self, key):
+    def clear(self, key: KeyType) -> "DataLoader[DataType]":
         """
         Clears the value at `key` from the cache, if it exists. Returns itself for
         method chaining.
@@ -125,7 +147,7 @@ class DataLoader(object):
         self._cache.pop(cache_key, None)
         return self
 
-    def clear_all(self):
+    def clear_all(self) -> "DataLoader[DataType]":
         """
         Clears the entire cache. To be used when some event results in unknown
         invalidations across this particular `DataLoader`. Returns itself for
@@ -134,7 +156,7 @@ class DataLoader(object):
         self._cache.clear()
         return self
 
-    def prime(self, key, value):
+    def prime(self, key: KeyType, value: DataType) -> "DataLoader[DataType]":
         """
         Adds the provied key and value to the cache. If the key already exists, no
         change is made. Returns itself for method chaining.
@@ -156,15 +178,19 @@ class DataLoader(object):
         return self
 
 
-def enqueue_post_future_job(loop, loader):
+def enqueue_post_future_job(loop: BaseEventLoop, loader: Loader):
     async def dispatch():
         dispatch_queue(loader)
+
     loop.call_soon(ensure_future, dispatch())
 
 
 def get_chunks(iterable_obj, chunk_size=1):
     chunk_size = max(1, chunk_size)
-    return (iterable_obj[i:i + chunk_size] for i in range(0, len(iterable_obj), chunk_size))
+    return (
+        iterable_obj[i : i + chunk_size]
+        for i in range(0, len(iterable_obj), chunk_size)
+    )
 
 
 def dispatch_queue(loader):
@@ -183,10 +209,7 @@ def dispatch_queue(loader):
     if max_batch_size and max_batch_size < len(queue):
         chunks = get_chunks(queue, max_batch_size)
         for chunk in chunks:
-            ensure_future(dispatch_queue_batch(
-                loader,
-                chunk
-            ))
+            ensure_future(dispatch_queue_batch(loader, chunk))
     else:
         ensure_future(dispatch_queue_batch(loader, queue))
 
@@ -203,32 +226,38 @@ async def dispatch_queue_batch(loader, queue):
         return failed_dispatch(
             loader,
             queue,
-            TypeError((
-                'DataLoader must be constructed with a function which accepts '
-                'Iterable<key> and returns Future<Iterable<value>>, but the function did '
-                'not return a Coroutine: {}.'
-            ).format(batch_future))
+            TypeError(
+                (
+                    "DataLoader must be constructed with a function which accepts "
+                    "Iterable<key> and returns Future<Iterable<value>>, but the function did "
+                    "not return a Coroutine: {}."
+                ).format(batch_future)
+            ),
         )
 
     try:
         values = await batch_future
         if not isinstance(values, Iterable):
-            raise TypeError((
-                'DataLoader must be constructed with a function which accepts '
-                'Iterable<key> and returns Future<Iterable<value>>, but the function did '
-                'not return a Future of a Iterable: {}.'
-            ).format(values))
+            raise TypeError(
+                (
+                    "DataLoader must be constructed with a function which accepts "
+                    "Iterable<key> and returns Future<Iterable<value>>, but the function did "
+                    "not return a Future of a Iterable: {}."
+                ).format(values)
+            )
 
         values = list(values)
         if len(values) != len(keys):
-            raise TypeError((
-                'DataLoader must be constructed with a function which accepts '
-                'Iterable<key> and returns Future<Iterable<value>>, but the function did '
-                'not return a Future of a Iterable with the same length as the Iterable '
-                'of keys.'
-                '\n\nKeys:\n{}'
-                '\n\nValues:\n{}'
-            ).format(keys, values))
+            raise TypeError(
+                (
+                    "DataLoader must be constructed with a function which accepts "
+                    "Iterable<key> and returns Future<Iterable<value>>, but the function did "
+                    "not return a Future of a Iterable with the same length as the Iterable "
+                    "of keys."
+                    "\n\nKeys:\n{}"
+                    "\n\nValues:\n{}"
+                ).format(keys, values)
+            )
 
         # Step through the values, resolving or rejecting each Future in the
         # loaded queue.
